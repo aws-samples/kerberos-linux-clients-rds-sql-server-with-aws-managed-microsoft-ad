@@ -1,0 +1,406 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: This template provision AWS Managed Microsoft AD, RDS SQL Server, EC2 Windows instance (AD Management Tool) and EC2 Linux instance for testing the Kerberos authentication in Linux clients.
+Parameters:
+  MicrosoftAdName:
+    Type: String
+    Default: rdsktest.awsexample.org
+  MicrosoftAdShortName:
+    Type: String
+    Default: RDSKTEST
+  RdsDBInstanceClass:
+    Type: String
+    Default: db.t3.xlarge
+    AllowedValues:
+      - db.t3.xlarge
+      - db.t3.2xlarge
+      - db.m5.large
+      - db.m5.xlarge
+      - db.m5.2xlarge
+  RdsMultiAZ:
+    Type: String
+    Default: false
+    AllowedValues:
+      - true
+      - false
+  Ec2WinInstanceType:
+    Type: String
+    Default: t3.large
+    AllowedValues:
+      - t3.small
+      - t3.medium
+      - t3.large
+      - m6i.medium
+      - m6i.large
+  Ec2LinuxInstanceType:
+    Type: String
+    Default: t3.medium
+    AllowedValues:
+      - t3.small
+      - t3.medium
+      - t3.large
+      - m6i.medium
+      - m6i.large
+  Ec2WinInstanceAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-windows-latest/Windows_Server-2019-English-Full-Base
+  Ec2LinuxInstanceAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/canonical/ubuntu/server/20.04/stable/current/amd64/hvm/ebs-gp2/ami-id
+  
+Resources:
+
+  MainVpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/24
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      InstanceTenancy: default
+      Tags:
+      - Key: Name
+        Value: vpc-rdsktest
+  MainVpcPublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref MainVpc
+      Tags:
+      - Key: Name
+        Value: vpc-rdsktest/rt-public
+  MainVpcPublicDefaultRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref MainVpcPublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref IgwMainVpc
+  IgwMainVpc:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+      - Key: Name
+        Value: vpc-rdsktest/igw
+  GwAttachMainVpc:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref MainVpc
+      InternetGatewayId: !Ref IgwMainVpc
+  SubnetAda:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: 10.0.0.0/27
+      VpcId: !Ref MainVpc
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: false
+      Tags:
+      - Key: Name
+        Value: vpc-rdsktest/subnet-ad-a
+  SubnetAdb:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: 10.0.0.32/27
+      VpcId: !Ref MainVpc
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: false
+      Tags:
+      - Key: Name
+        Value: vpc-rdsktest/subnet-ad-b
+  SubnetRdsa:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: 10.0.0.64/27
+      VpcId: !Ref MainVpc
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: false
+      Tags:
+      - Key: Name
+        Value: vpc-rdsktest/subnet-rds-a
+  SubnetRdsb:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: 10.0.0.96/27
+      VpcId: !Ref MainVpc
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: false
+      Tags:
+      - Key: Name
+        Value: vpc-rdsktest/subnet-rds-b
+  SubnetEc2Win:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: 10.0.0.128/27
+      VpcId: !Ref MainVpc
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+      - Key: Name
+        Value: vpc-rdsktest/subnet-ec2-win
+  SubnetEc2Linux:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: 10.0.0.160/27
+      VpcId: !Ref MainVpc
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+      - Key: Name
+        Value: vpc-rdsktest/subnet-ec2-linux
+  RtAsscSubnetEc2Win:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref MainVpcPublicRouteTable
+      SubnetId: !Ref SubnetEc2Win
+  RtAsscSubnetLinuxWin:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref MainVpcPublicRouteTable
+      SubnetId: !Ref SubnetEc2Linux
+
+  SecurityGroupEc2:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group for EC2 instances
+      SecurityGroupEgress:
+      - CidrIp: 0.0.0.0/0
+        Description: Allow all outbound traffic
+        IpProtocol: -1
+      Tags:
+      - Key: Name
+        Value: vpc-rdsktest/sg-ec2
+      VpcId: !Ref MainVpc
+  SecurityGroupRds:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group for RDS SQL Server
+      SecurityGroupEgress:
+      - CidrIp: 0.0.0.0/0
+        Description: Allow all outbound traffic
+        IpProtocol: -1
+      SecurityGroupIngress:
+      - SourceSecurityGroupId: !GetAtt SecurityGroupEc2.GroupId
+        Description: Allow 1433 port inbound from EC2 instances
+        IpProtocol: tcp
+        FromPort: 1433
+        ToPort: 1433
+      Tags:
+      - Key: Name
+        Value: vpc-rdsktest/sg-rds
+      VpcId: !Ref MainVpc
+
+  SecretMicrosoftAd:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: rdsktest/ad
+      GenerateSecretString:
+        SecretStringTemplate: '{}'
+        GenerateStringKey: "password"
+        PasswordLength: 10
+        ExcludeCharacters: '@"/\<>'
+  MicrosoftAd: 
+    Type: AWS::DirectoryService::MicrosoftAD
+    Properties: 
+      Edition: Standard
+      Name: !Ref MicrosoftAdName
+      ShortName: !Ref MicrosoftAdShortName
+      Password: '{{resolve:secretsmanager:rdsktest/ad:SecretString:password}}'
+      VpcSettings: 
+        SubnetIds: [!Ref SubnetAda, !Ref SubnetAdb]
+        VpcId: !Ref MainVpc
+    DependsOn:
+    - SecretMicrosoftAd
+    
+  SecretRdsSqlServer:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: rdsktest/rds
+      GenerateSecretString:
+        SecretStringTemplate: '{"username":"admin"}'
+        GenerateStringKey: "password"
+        PasswordLength: 10
+        ExcludeCharacters: '@"/\<>'   
+  RdsSqlServer:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Delete
+    Properties:
+      DBInstanceIdentifier: rds-instance1
+      DBInstanceClass: !Ref RdsDBInstanceClass
+      StorageType: gp3
+      AllocatedStorage: 20
+      Engine: sqlserver-se
+      EngineVersion: 15.00.4316.3.v1
+      LicenseModel: license-included
+      MasterUsername: '{{resolve:secretsmanager:rdsktest/rds:SecretString:username}}'
+      MasterUserPassword: '{{resolve:secretsmanager:rdsktest/rds:SecretString:password}}'
+      MultiAZ: !Ref RdsMultiAZ
+      PubliclyAccessible: False
+      DBSubnetGroupName: !Ref DbSubnetGpRdsSqlServer
+      VPCSecurityGroups: [!Ref SecurityGroupRds]
+      Domain: !Ref MicrosoftAd
+      DomainIAMRoleName: !Ref RdsRole
+    DependsOn:
+    - SecretRdsSqlServer
+  DbSubnetGpRdsSqlServer:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties: 
+      DBSubnetGroupDescription: DBSubnetGroup for RDS SQL Server
+      DBSubnetGroupName: dbsubnetgroup-rds-ktest
+      SubnetIds: [!Ref SubnetRdsa, !Ref SubnetRdsb]
+   
+  RdsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "rdsktest-RdsRole-${AWS::Region}"
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: rds.amazonaws.com
+          Action: sts:AssumeRole
+          Condition:
+            StringEquals:
+              "aws:SourceAccount": !Sub "${AWS::AccountId}"
+        Version: '2012-10-17'
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/service-role/AmazonRDSDirectoryServiceAccess
+  Ec2InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "rdsktest-Ec2InstanceRole-${AWS::Region}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+              - ec2.amazonaws.com
+          Action:
+            - sts:AssumeRole
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      - arn:aws:iam::aws:policy/AmazonSSMDirectoryServiceAccess
+      Policies:
+      - PolicyName: inline-policy
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action:
+              - secretsmanager:GetSecretValue
+              Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:rdsktest/*"
+  Ec2InstanceProfile: 
+    Type: AWS::IAM::InstanceProfile
+    Properties: 
+      InstanceProfileName: !Sub "rdsktest-Ec2InstanceProfile-${AWS::Region}"
+      Path: "/"
+      Roles: [!Ref Ec2InstanceRole]
+ 
+  Ec2KeyPair:
+    Type: 'AWS::EC2::KeyPair'
+    Properties:
+      KeyName: keypair-rdstest
+  Ec2Win:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref Ec2WinInstanceAmiId
+      InstanceType: !Ref Ec2WinInstanceType
+      KeyName: !Ref Ec2KeyPair
+      IamInstanceProfile: !Ref Ec2InstanceProfile
+      SubnetId: !Ref SubnetEc2Win
+      SecurityGroupIds: [!GetAtt SecurityGroupEc2.GroupId]
+      BlockDeviceMappings:
+      - DeviceName: /dev/sda1
+        Ebs: {VolumeType: gp3, VolumeSize: 32}
+      UserData:
+        Fn::Base64: !Sub |
+          <powershell>
+          Install-WindowsFeature RSAT-AD-Tools,RSAT-AD-PowerShell,RSAT-ADDS,RSAT-AD-AdminCenter,RSAT-ADDS-Tools,RSAT-DNS-Server
+          Set-ExecutionPolicy RemoteSigned 
+          Start-Process msiexec.exe -Wait -ArgumentList '/I https://awscli.amazonaws.com/AWSCLIV2.msi /quiet'
+          </powershell>
+      Tags: [{Key: Name, Value: "rdsktest-win" }]
+      SsmAssociations:
+      - DocumentName: !Ref SsmDocumentJoinAdDomain
+        AssociationParameters:
+        - Key: directoryId
+          Value: [!Ref MicrosoftAd]
+        - Key: directoryName
+          Value: [!Ref MicrosoftAdName]
+        - Key: dnsIpAddresses
+          Value: !GetAtt MicrosoftAd.DnsIpAddresses
+  Ec2Linux:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref Ec2LinuxInstanceAmiId
+      InstanceType: !Ref Ec2LinuxInstanceType
+      KeyName: !Ref Ec2KeyPair
+      IamInstanceProfile: !Ref Ec2InstanceProfile
+      SubnetId: !Ref SubnetEc2Linux
+      SecurityGroupIds: [!GetAtt SecurityGroupEc2.GroupId]
+      BlockDeviceMappings:
+      - DeviceName: /dev/sda1
+        Ebs: {VolumeType: gp3, VolumeSize: 8}
+      Tags: [{Key: Name, Value: "rdsktest-linux" }]
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          sudo apt update
+          sudo apt -y install unzip
+          curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
+          unzip /tmp/awscliv2.zip -d /tmp
+          sudo /tmp/aws/install
+          sudo apt -y install jq
+          sudo apt -y install openjdk-11-jdk-headless
+  Ec2DhcpOptions: 
+    Type: AWS::EC2::DHCPOptions
+    Properties: 
+      DomainName: !Ref MicrosoftAdName
+      DomainNameServers: !GetAtt MicrosoftAd.DnsIpAddresses
+  VpcDhcpOptionAsscCloudApp:
+    Type: AWS::EC2::VPCDHCPOptionsAssociation
+    Properties: 
+      DhcpOptionsId: !Ref Ec2DhcpOptions
+      VpcId: !Ref MainVpc
+  SsmDocumentJoinAdDomain:
+    Type: AWS::SSM::Document
+    Properties:
+      Content:
+        schemaVersion: '1.2'
+        description: Join instances to an AWS Directory Service domain.
+        parameters:
+          directoryId:
+            type: String
+            description: "(Required) The ID of the AWS Directory Service directory."
+          directoryName:
+            type: String
+            description: "(Required) The name of the directory; for example, test.example.com"
+          dnsIpAddresses:
+            type: StringList
+            default: []
+            description: "(Optional) The IP addresses of the DNS servers in the directory.
+              Required when DHCP is not configured. Learn more at http://docs.aws.amazon.com/directoryservice/latest/simple-ad/join_get_dns_addresses.html"
+            allowedPattern: "((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)"
+        runtimeConfig:
+          'aws:domainJoin':
+            properties:
+              directoryId: "{{ directoryId }}"
+              directoryName: "{{ directoryName }}"
+              dnsIpAddresses: "{{ dnsIpAddresses }}"
+              
+Outputs:
+
+  MicrosoftAd:
+    Value: !Ref MicrosoftAd
+  MicrosoftAdDnsIpAddresses:
+    Value: !Join
+      - ''
+      - - '["'
+        - !Join ['","', !GetAtt MicrosoftAd.DnsIpAddresses]
+        - '"]'
+  SecretMicrosoftAd:
+    Value: !GetAtt SecretMicrosoftAd.Id
+  RdsSqlServer:
+    Value: !Ref RdsSqlServer
+  SecretRdsSqlServerId:
+    Value: !GetAtt SecretRdsSqlServer.Id
+  Ec2Win:
+    Value: !Ref Ec2Win
+  Ec2Linux:
+    Value: !Ref Ec2Linux
